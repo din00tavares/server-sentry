@@ -4,8 +4,8 @@
 # ==============================================================================
 # 100% Generic and Autonomous:
 # 1. Dynamically discovers proxy domains configured in Nginx Proxy Manager.
-# 2. Dynamically discovers active Docker containers exposing web ports.
-# 3. Discovers Server-Sentry internal services (Beszel Hub, Uptime Kuma).
+# 2. Dynamically discovers Docker services with published web ports (handling port ranges).
+# 3. Dynamically discovers background Docker worker containers & bots (Docker socket monitoring).
 # 4. Configures/syncs default Telegram notification provider using .env values.
 # 5. Idempotent: Preserves existing monitors and only inserts newly detected apps.
 # ==============================================================================
@@ -29,30 +29,33 @@ def load_env(env_path):
     return env
 
 def get_npm_domains():
-    """Dynamically discovers proxy domains configured in Nginx Proxy Manager."""
+    """Discovers all active proxy domains and upstream targets from Nginx Proxy Manager."""
     discovered = []
+    upstream_servers = set()
     try:
         res = subprocess.run(
-            ['docker', 'ps', '--format', '{{.Names}}\t{{.Image}}'],
+            ['docker', 'ps', '--filter', 'name=nginx-proxy-manager', '--format', '{{.Names}}'],
             capture_output=True, text=True, check=True
         )
-        npm_containers = [
-            line.split('\t')[0] for line in res.stdout.strip().split('\n')
-            if 'nginx-proxy-manager' in line.lower()
-        ]
-        
-        if not npm_containers:
-            return discovered
+        npm_name = res.stdout.strip().split('\n')[0]
+        if not npm_name:
+            return discovered, upstream_servers
 
-        npm_name = npm_containers[0]
-        list_files_cmd = "ls /data/nginx/proxy_host/*.conf 2>/dev/null || true"
-        files_out = subprocess.run(['docker', 'exec', npm_name, 'sh', '-c', list_files_cmd], capture_output=True, text=True)
+        files_out = subprocess.run(
+            ['docker', 'exec', npm_name, 'sh', '-c', 'ls -1 /data/nginx/proxy_host/*.conf 2>/dev/null'],
+            capture_output=True, text=True
+        )
         conf_files = files_out.stdout.strip().split()
 
         for conf_file in conf_files:
             cat_cmd = f"cat {conf_file}"
             c = subprocess.run(['docker', 'exec', npm_name, 'sh', '-c', cat_cmd], capture_output=True, text=True)
             content = c.stdout
+
+            # Extract upstream server/target if present
+            m_server = re.findall(r'set\s+\$server\s+["\']?([^"\';]+)["\']?;', content)
+            for s in m_server:
+                upstream_servers.add(s.strip().lower())
 
             # Extract server_name domains
             names = []
@@ -73,6 +76,7 @@ def get_npm_domains():
                 sub = domain.split('.')[0].replace('-', ' ').title()
                 discovered.append({
                     "name": sub,
+                    "type": "http",
                     "url": f"{scheme}://{domain}",
                     "accepted_codes": '["200-299","300-399","404"]' if 'api' in domain else '["200-299","300-399"]',
                     "description": f"Automatically discovered via Nginx Proxy Manager ({domain})"
@@ -80,11 +84,13 @@ def get_npm_domains():
     except Exception as e:
         print(f"ℹ️  No domains extracted from NPM: {e}")
 
-    return discovered
+    return discovered, upstream_servers
 
-def get_docker_http_services():
+def get_docker_http_services(upstream_servers):
     """Discovers Docker containers with published web ports on the host."""
     discovered = []
+    covered_containers = set()
+
     try:
         res = subprocess.run(
             ['docker', 'ps', '--format', '{{.Names}}\t{{.Ports}}'],
@@ -97,25 +103,74 @@ def get_docker_http_services():
             name = parts[0]
             ports_raw = parts[1] if len(parts) > 1 else ""
 
-            # Exclude internal sentry and proxy manager containers to avoid duplicates
+            # Exclude internal sentry and proxy manager containers
             if 'server-sentry' in name or 'nginx-proxy-manager' in name:
                 continue
 
-            matches = re.findall(r'(?:0\.0\.0\.0|127\.0\.0\.1):(\d+)->(\d+)/tcp', ports_raw)
-            for host_port, cont_port in matches:
-                p = int(host_port)
-                if p in [80, 443, 22, 25, 465, 587, 993, 4190, 27017, 6379]:
+            # Support both single port and port ranges e.g. 127.0.0.1:6333-6334->6333-6334/tcp
+            matches = re.findall(r'(?:0\.0\.0\.0|127\.0\.0\.1):(\d+(?:-\d+)?)->(\d+(?:-\d+)?)/tcp', ports_raw)
+            if not matches:
+                continue
+
+            # Check if this container is already proxied via NPM
+            clean_name = name.lower()
+            if any(srv in clean_name for srv in upstream_servers):
+                covered_containers.add(name)
+                continue
+
+            for host_port_range, cont_port_range in matches:
+                primary_port_str = host_port_range.split('-')[0]
+                p = int(primary_port_str)
+                # Ignore non-web internal infra ports
+                if p in [80, 443, 22, 25, 465, 587, 993, 4190, 27017, 6379, 5432, 5433, 5434]:
                     continue
-                
+
                 friendly_name = name.replace('-', ' ').replace('_', ' ').title()
                 discovered.append({
-                    "name": f"{friendly_name} (Port {host_port})",
-                    "url": f"http://127.0.0.1:{host_port}",
+                    "name": f"{friendly_name} (Port {p})",
+                    "type": "http",
+                    "url": f"http://127.0.0.1:{p}",
                     "accepted_codes": '["200-299","300-399","401","404"]',
-                    "description": f"Docker container service detected on host port {host_port}"
+                    "description": f"Docker container service detected on host port {p} ({name})"
                 })
+                covered_containers.add(name)
+                break # Monitor primary exposed port
+
     except Exception as e:
         print(f"ℹ️  Warning while scanning Docker ports: {e}")
+
+    return discovered, covered_containers
+
+def get_docker_worker_containers(covered_containers, docker_host_id):
+    """Discovers background containers and bots without exposed web ports."""
+    discovered = []
+    try:
+        res = subprocess.run(
+            ['docker', 'ps', '--format', '{{.Names}}'],
+            capture_output=True, text=True, check=True
+        )
+        for line in res.stdout.strip().split('\n'):
+            name = line.strip()
+            if not name:
+                continue
+
+            if 'server-sentry' in name or 'nginx-proxy-manager' in name:
+                continue
+
+            if name in covered_containers:
+                continue
+
+            friendly_name = name.replace('-', ' ').replace('_', ' ').title()
+            discovered.append({
+                "name": f"{friendly_name} (Container)",
+                "type": "docker",
+                "docker_host": docker_host_id,
+                "docker_container": name,
+                "url": None,
+                "description": f"Autonomous Docker container health monitor for {name}"
+            })
+    except Exception as e:
+        print(f"ℹ️  Warning while scanning Docker worker containers: {e}")
 
     return discovered
 
@@ -168,76 +223,105 @@ def main():
             notif_id = cur.lastrowid
             print(f"🔔 New Telegram notification provider created: Telegram [{server_name}] (ID: {notif_id})")
 
-    # 2. Dynamic Discovery
+    # 2. Ensure Local Docker Daemon Host is configured for Docker-type monitors
+    cur.execute("SELECT id FROM docker_host WHERE docker_daemon = '/var/run/docker.sock'")
+    row = cur.fetchone()
+    if not row:
+        cur.execute("INSERT INTO docker_host (user_id, docker_daemon, docker_type, name) VALUES (1, '/var/run/docker.sock', 'socket', 'Local Docker Daemon')")
+        docker_host_id = cur.lastrowid
+    else:
+        docker_host_id = row[0]
+
+    # 3. Dynamic Discovery
     print("\n🔍 Initiating dynamic service discovery...")
     candidates = []
 
-    # A. Domains from Nginx Proxy Manager
-    npm_apps = get_npm_domains()
+    # A. Public domains from Nginx Proxy Manager
+    npm_apps, upstream_servers = get_npm_domains()
     print(f"  • {len(npm_apps)} domain(s) discovered in Nginx Proxy Manager.")
     candidates.extend(npm_apps)
 
-    # B. If no external NPM domains found, scan exposed container ports
-    if not npm_apps:
-        docker_apps = get_docker_http_services()
-        print(f"  • {len(docker_apps)} HTTP service(s) discovered in Docker containers.")
-        candidates.extend(docker_apps)
+    # B. Exposed container ports (handling ranges e.g. 6333-6334)
+    docker_apps, covered_containers = get_docker_http_services(upstream_servers)
+    print(f"  • {len(docker_apps)} standalone HTTP service(s) discovered on host ports.")
+    candidates.extend(docker_apps)
 
-        # Register Server-Sentry internal services
-        candidates.append({
-            "name": "Beszel Hub (Hardware)",
-            "url": f"http://server-sentry-beszel-hub:{beszel_port}",
-            "accepted_codes": '["200-299"]',
-            "description": "Server-Sentry hardware telemetry dashboard"
-        })
-        candidates.append({
-            "name": "Uptime Kuma (Status)",
-            "url": f"http://127.0.0.1:{kuma_port}/dashboard",
-            "accepted_codes": '["200-299","300-399"]',
-            "description": "Server-Sentry service health monitor"
-        })
+    # C. Background workers, bots & daemon containers without web ports
+    worker_apps = get_docker_worker_containers(covered_containers, docker_host_id)
+    print(f"  • {len(worker_apps)} background container(s)/bot(s) discovered for Docker monitoring.")
+    candidates.extend(worker_apps)
 
-    # 3. Idempotent insertion into Uptime Kuma
+    # 4. Idempotent insertion into Uptime Kuma
     added_count = 0
     existing_count = 0
-    seen_urls = set()
 
-    cur.execute("SELECT url FROM monitor")
-    existing_urls = {r[0] for r in cur.fetchall()}
+    cur.execute("SELECT url, docker_container, name FROM monitor")
+    existing_records = cur.fetchall()
+    existing_urls = {r[0] for r in existing_records if r[0]}
+    existing_containers = {r[1] for r in existing_records if r[1]}
+    existing_names = {r[2] for r in existing_records if r[2]}
 
     for item in candidates:
-        url = item["url"]
+        m_type = item.get("type", "http")
         name = item["name"]
-        codes = item.get("accepted_codes", '["200-299"]')
         desc = item.get("description", "")
 
-        if url in seen_urls:
-            continue
-        seen_urls.add(url)
+        if m_type == "http":
+            url = item["url"]
+            codes = item.get("accepted_codes", '["200-299"]')
 
-        if url in existing_urls:
-            existing_count += 1
+            if url in existing_urls or name in existing_names:
+                existing_count += 1
+                if notif_id:
+                    cur.execute("SELECT id FROM monitor WHERE url = ? OR name = ?", (url, name))
+                    m_row = cur.fetchone()
+                    if m_row:
+                        cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_row[0], notif_id))
+                continue
+
+            cur.execute("""
+                INSERT INTO monitor (
+                    name, active, user_id, interval, url, type, weight,
+                    maxretries, ignore_tls, upside_down, maxredirects,
+                    accepted_statuscodes_json, retry_interval, method,
+                    expiry_notification, description, timeout
+                ) VALUES (?, 1, 1, 60, ?, 'http', 2000, 1, 0, 0, 10, ?, 30, 'GET', 1, ?, 48)
+            """, (name, url, codes, desc))
+            m_id = cur.lastrowid
+            added_count += 1
+
             if notif_id:
-                cur.execute("SELECT id FROM monitor WHERE url = ?", (url,))
-                m_id = cur.fetchone()[0]
                 cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_id, notif_id))
-            continue
 
-        cur.execute("""
-            INSERT INTO monitor (
-                name, active, user_id, interval, url, type, weight,
-                maxretries, ignore_tls, upside_down, maxredirects,
-                accepted_statuscodes_json, retry_interval, method,
-                expiry_notification, description, timeout
-            ) VALUES (?, 1, 1, 60, ?, 'http', 2000, 1, 0, 0, 10, ?, 30, 'GET', 1, ?, 48)
-        """, (name, url, codes, desc))
-        m_id = cur.lastrowid
-        added_count += 1
+            print(f"  ➕ New HTTP monitor registered: [{name}] -> {url}")
 
-        if notif_id:
-            cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_id, notif_id))
+        elif m_type == "docker":
+            container_name = item["docker_container"]
+            d_host = item["docker_host"]
 
-        print(f"  ➕ New monitor registered: [{name}] -> {url}")
+            if container_name in existing_containers or name in existing_names:
+                existing_count += 1
+                if notif_id:
+                    cur.execute("SELECT id FROM monitor WHERE docker_container = ? OR name = ?", (container_name, name))
+                    m_row = cur.fetchone()
+                    if m_row:
+                        cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_row[0], notif_id))
+                continue
+
+            cur.execute("""
+                INSERT INTO monitor (
+                    name, active, user_id, interval, type, weight,
+                    maxretries, retry_interval, docker_host, docker_container,
+                    description, timeout
+                ) VALUES (?, 1, 1, 60, 'docker', 2000, 1, 30, ?, ?, ?, 48)
+            """, (name, d_host, container_name, desc))
+            m_id = cur.lastrowid
+            added_count += 1
+
+            if notif_id:
+                cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_id, notif_id))
+
+            print(f"  ➕ New Docker container monitor registered: [{name}] -> {container_name}")
 
     conn.commit()
     conn.close()
