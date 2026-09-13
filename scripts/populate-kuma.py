@@ -4,10 +4,9 @@
 # ==============================================================================
 # 100% Generic and Autonomous:
 # 1. Dynamically discovers proxy domains configured in Nginx Proxy Manager.
-# 2. Dynamically discovers Docker services with published web ports (handling port ranges).
-# 3. Dynamically discovers background Docker worker containers & bots (Docker socket monitoring).
-# 4. Configures/syncs default Telegram notification provider using .env values.
-# 5. Idempotent: Preserves existing monitors and only inserts newly detected apps.
+# 2. Dynamically discovers standalone Docker containers & bots (via Docker daemon socket).
+# 3. Configures/syncs default Telegram notification provider using .env values.
+# 4. Idempotent: Preserves existing monitors and only inserts newly detected apps.
 # ==============================================================================
 
 import os
@@ -86,63 +85,8 @@ def get_npm_domains():
 
     return discovered, upstream_servers
 
-def get_docker_http_services(upstream_servers):
-    """Discovers Docker containers with published web ports on the host."""
-    discovered = []
-    covered_containers = set()
-
-    try:
-        res = subprocess.run(
-            ['docker', 'ps', '--format', '{{.Names}}\t{{.Ports}}'],
-            capture_output=True, text=True, check=True
-        )
-        for line in res.stdout.strip().split('\n'):
-            if not line.strip():
-                continue
-            parts = line.split('\t')
-            name = parts[0]
-            ports_raw = parts[1] if len(parts) > 1 else ""
-
-            # Exclude internal sentry and proxy manager containers
-            if 'server-sentry' in name or 'nginx-proxy-manager' in name:
-                continue
-
-            # Support both single port and port ranges e.g. 127.0.0.1:6333-6334->6333-6334/tcp
-            matches = re.findall(r'(?:0\.0\.0\.0|127\.0\.0\.1):(\d+(?:-\d+)?)->(\d+(?:-\d+)?)/tcp', ports_raw)
-            if not matches:
-                continue
-
-            # Check if this container is already proxied via NPM
-            clean_name = name.lower()
-            if any(srv in clean_name for srv in upstream_servers):
-                covered_containers.add(name)
-                continue
-
-            for host_port_range, cont_port_range in matches:
-                primary_port_str = host_port_range.split('-')[0]
-                p = int(primary_port_str)
-                # Ignore non-web internal infra ports
-                if p in [80, 443, 22, 25, 465, 587, 993, 4190, 27017, 6379, 5432, 5433, 5434]:
-                    continue
-
-                friendly_name = name.replace('-', ' ').replace('_', ' ').title()
-                discovered.append({
-                    "name": f"{friendly_name} (Port {p})",
-                    "type": "http",
-                    "url": f"http://127.0.0.1:{p}",
-                    "accepted_codes": '["200-299","300-399","401","404"]',
-                    "description": f"Docker container service detected on host port {p} ({name})"
-                })
-                covered_containers.add(name)
-                break # Monitor primary exposed port
-
-    except Exception as e:
-        print(f"ℹ️  Warning while scanning Docker ports: {e}")
-
-    return discovered, covered_containers
-
-def get_docker_worker_containers(covered_containers, docker_host_id):
-    """Discovers background containers and bots without exposed web ports."""
+def get_docker_containers(upstream_servers, docker_host_id):
+    """Discovers standalone Docker containers, bots, and workers not already routed via NPM."""
     discovered = []
     try:
         res = subprocess.run(
@@ -154,10 +98,13 @@ def get_docker_worker_containers(covered_containers, docker_host_id):
             if not name:
                 continue
 
+            # Exclude internal Server-Sentry and proxy manager
             if 'server-sentry' in name or 'nginx-proxy-manager' in name:
                 continue
 
-            if name in covered_containers:
+            # Check if this container is already proxied via NPM upstream
+            clean_name = name.lower()
+            if any(srv in clean_name for srv in upstream_servers):
                 continue
 
             friendly_name = name.replace('-', ' ').replace('_', ' ').title()
@@ -166,11 +113,10 @@ def get_docker_worker_containers(covered_containers, docker_host_id):
                 "type": "docker",
                 "docker_host": docker_host_id,
                 "docker_container": name,
-                "url": None,
                 "description": f"Autonomous Docker container health monitor for {name}"
             })
     except Exception as e:
-        print(f"ℹ️  Warning while scanning Docker worker containers: {e}")
+        print(f"ℹ️  Warning while scanning Docker containers: {e}")
 
     return discovered
 
@@ -183,8 +129,6 @@ def main():
     server_name = env.get('SERVER_NAME', 'PROD-SERVER')
     bot_token = env.get('TELEGRAM_BOT_TOKEN', '')
     chat_id = env.get('TELEGRAM_CHAT_ID', '')
-    kuma_port = env.get('UPTIME_KUMA_PORT', '3001')
-    beszel_port = env.get('BESZEL_PORT', '8090')
 
     db_path = '/var/lib/docker/volumes/server-sentry-uptime-kuma-data/_data/kuma.db'
     if not os.path.exists(db_path):
@@ -241,15 +185,10 @@ def main():
     print(f"  • {len(npm_apps)} domain(s) discovered in Nginx Proxy Manager.")
     candidates.extend(npm_apps)
 
-    # B. Exposed container ports (handling ranges e.g. 6333-6334)
-    docker_apps, covered_containers = get_docker_http_services(upstream_servers)
-    print(f"  • {len(docker_apps)} standalone HTTP service(s) discovered on host ports.")
+    # B. Standalone Docker containers & bots (Docker socket monitoring)
+    docker_apps = get_docker_containers(upstream_servers, docker_host_id)
+    print(f"  • {len(docker_apps)} standalone container(s)/bot(s) discovered for Docker monitoring.")
     candidates.extend(docker_apps)
-
-    # C. Background workers, bots & daemon containers without web ports
-    worker_apps = get_docker_worker_containers(covered_containers, docker_host_id)
-    print(f"  • {len(worker_apps)} background container(s)/bot(s) discovered for Docker monitoring.")
-    candidates.extend(worker_apps)
 
     # 4. Idempotent insertion into Uptime Kuma
     added_count = 0
