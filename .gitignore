@@ -1,0 +1,22 @@
+# ==============================================================================
+# SERVER-SENTRY: Git Ignore Rules
+# ==============================================================================
+
+# Sensitive Environment Configurations (NEVER COMMIT CREDENTIALS)
+.env
+.env.*
+!.env.example
+
+# Temporary / Log files
+*.log
+*.tmp
+__pycache__/
+*.py[cod]
+
+# System / Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

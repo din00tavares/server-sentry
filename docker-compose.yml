@@ -1,0 +1,80 @@
+# ==============================================================================
+# SERVER-SENTRY: Autonomous Docker Stack (Monitoring, Self-Healing & Metrics)
+# ==============================================================================
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. AUTOHEAL: Self-healing container monitor and auto-restarter
+  # ----------------------------------------------------------------------------
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: server-sentry-autoheal
+    restart: always
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=${AUTOHEAL_INTERVAL:-20}
+      - AUTOHEAL_START_PERIOD=${AUTOHEAL_START_PERIOD:-60}
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - sentry-net
+
+  # ----------------------------------------------------------------------------
+  # 2. UPTIME KUMA: Service & Endpoint Uptime Monitor with Telegram Alerts
+  # ----------------------------------------------------------------------------
+  uptime-kuma:
+    image: louislam/uptime-kuma:2
+    container_name: server-sentry-uptime-kuma
+    restart: always
+    environment:
+      - SERVER_NAME=${SERVER_NAME}
+    ports:
+      - "${UPTIME_KUMA_PORT:-3001}:3001"
+    volumes:
+      - uptime-kuma-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./scripts/kuma-telegram.js:/app/server/notification-providers/telegram.js:ro
+    networks:
+      - sentry-net
+
+  # ----------------------------------------------------------------------------
+  # 3. BESZEL HUB: Lightweight Web Dashboard for Server Hardware Telemetry
+  # ----------------------------------------------------------------------------
+  beszel-hub:
+    image: henrygd/beszel:latest
+    container_name: server-sentry-beszel-hub
+    restart: always
+    ports:
+      - "${BESZEL_PORT:-8090}:8090"
+    volumes:
+      - beszel-data:/beszel_data
+    networks:
+      - sentry-net
+
+  # ----------------------------------------------------------------------------
+  # 4. BESZEL AGENT: Host Metrics Collector (CPU, RAM, Disk, Docker Stats)
+  # ----------------------------------------------------------------------------
+  beszel-agent:
+    image: henrygd/beszel-agent:latest
+    container_name: server-sentry-beszel-agent
+    restart: always
+    network_mode: host
+    environment:
+      - PORT=45876
+      # Automatically loaded from BESZEL_KEY in .env
+      - KEY=${BESZEL_KEY}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/extra-filesystems/root:ro
+
+volumes:
+  uptime-kuma-data:
+    name: server-sentry-uptime-kuma-data
+  beszel-data:
+    name: server-sentry-beszel-data
+
+networks:
+  sentry-net:
+    name: server-sentry-net
+    driver: bridge
