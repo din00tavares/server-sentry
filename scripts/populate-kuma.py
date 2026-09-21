@@ -120,6 +120,20 @@ def get_docker_containers(upstream_servers, docker_host_id):
 
     return discovered
 
+def link_monitor_notification(cur, monitor_id, notification_id):
+    """Ensures a monitor is linked to a notification provider exactly once (idempotent)."""
+    if not monitor_id or not notification_id:
+        return
+    cur.execute(
+        "SELECT 1 FROM monitor_notification WHERE monitor_id = ? AND notification_id = ?",
+        (monitor_id, notification_id)
+    )
+    if not cur.fetchone():
+        cur.execute(
+            "INSERT INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)",
+            (monitor_id, notification_id)
+        )
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_dir = os.path.abspath(os.path.join(script_dir, '..'))
@@ -166,6 +180,15 @@ def main():
             )
             notif_id = cur.lastrowid
             print(f"🔔 New Telegram notification provider created: Telegram [{server_name}] (ID: {notif_id})")
+
+    # Clean up any duplicate notification associations and enforce unique constraint
+    cur.execute("""
+        DELETE FROM monitor_notification
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM monitor_notification GROUP BY monitor_id, notification_id
+        )
+    """)
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_notification_unique ON monitor_notification(monitor_id, notification_id)")
 
     # 2. Ensure Local Docker Daemon Host is configured for Docker-type monitors
     cur.execute("SELECT id FROM docker_host WHERE docker_daemon = '/var/run/docker.sock'")
@@ -215,7 +238,7 @@ def main():
                     cur.execute("SELECT id FROM monitor WHERE url = ? OR name = ?", (url, name))
                     m_row = cur.fetchone()
                     if m_row:
-                        cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_row[0], notif_id))
+                        link_monitor_notification(cur, m_row[0], notif_id)
                 continue
 
             cur.execute("""
@@ -230,7 +253,7 @@ def main():
             added_count += 1
 
             if notif_id:
-                cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_id, notif_id))
+                link_monitor_notification(cur, m_id, notif_id)
 
             print(f"  ➕ New HTTP monitor registered: [{name}] -> {url}")
 
@@ -244,7 +267,7 @@ def main():
                     cur.execute("SELECT id FROM monitor WHERE docker_container = ? OR name = ?", (container_name, name))
                     m_row = cur.fetchone()
                     if m_row:
-                        cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_row[0], notif_id))
+                        link_monitor_notification(cur, m_row[0], notif_id)
                 continue
 
             cur.execute("""
@@ -258,7 +281,7 @@ def main():
             added_count += 1
 
             if notif_id:
-                cur.execute("INSERT OR IGNORE INTO monitor_notification (monitor_id, notification_id) VALUES (?, ?)", (m_id, notif_id))
+                link_monitor_notification(cur, m_id, notif_id)
 
             print(f"  ➕ New Docker container monitor registered: [{name}] -> {container_name}")
 
