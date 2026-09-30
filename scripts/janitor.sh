@@ -25,6 +25,36 @@ PRUNE_UNTIL="${PRUNE_UNTIL_HOURS:-72h}"
 DISK_ALERT_THRESHOLD="${ALERT_DISK_THRESHOLD_PERCENT:-85}"
 RAM_ALERT_THRESHOLD="${ALERT_RAM_THRESHOLD_PERCENT:-90}"
 
+# Error handler: Dispatches an emergency alert to Telegram if any unhandled error occurs
+handle_error() {
+  local exit_code="$?"
+  local line_number="$1"
+  local last_command="${BASH_COMMAND}"
+
+  echo "=========================================================" >&2
+  echo " [Server-Sentry Janitor] FATAL ERROR on line ${line_number} (exit code ${exit_code})" >&2
+  echo " Failed command: ${last_command}" >&2
+  echo "=========================================================" >&2
+
+  local error_msg="🚨 <b>Janitor Maintenance FAILED!</b>
+
+• Status: <b>Routine aborted due to an error</b>
+• Failed at line: <b>${line_number}</b>
+• Exit code: <b>${exit_code}</b>
+• Command: <code>${last_command}</code>
+
+⚠️ Nightly cleanup did NOT finish successfully.
+Check log: <code>${PROJECT_DIR}/logs/janitor.log</code>"
+
+  if [[ -f "${SCRIPT_DIR}/notify-telegram.sh" ]]; then
+    "${SCRIPT_DIR}/notify-telegram.sh" "${error_msg}" || true
+  fi
+
+  exit "${exit_code}"
+}
+
+trap 'handle_error ${LINENO}' ERR
+
 echo "========================================================="
 echo " [Server-Sentry Janitor] Starting maintenance routine..."
 echo "========================================================="

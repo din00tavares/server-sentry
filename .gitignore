@@ -8,6 +8,8 @@
 !.env.example
 
 # Temporary / Log files
+logs/*
+!logs/.gitkeep
 *.log
 *.tmp
 __pycache__/

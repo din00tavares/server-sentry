@@ -83,8 +83,10 @@ fi
 
 # 5. Idempotent Cronjob Configuration (Daily Cleanup at 03:00)
 JANITOR_PATH="${SCRIPT_DIR}/scripts/janitor.sh"
-LOG_PATH="/var/log/server-sentry-janitor.log"
-CRON_LINE="0 3 * * * ${JANITOR_PATH} >> ${LOG_PATH} 2>&1"
+LOG_DIR="${SCRIPT_DIR}/logs"
+LOG_PATH="${LOG_DIR}/janitor.log"
+mkdir -p "${LOG_DIR}"
+CRON_LINE="0 3 * * * ${JANITOR_PATH} >> ${LOG_PATH} 2>&1 || ${SCRIPT_DIR}/scripts/notify-telegram.sh \"🚨 Janitor cronjob execution failed! Check ${LOG_PATH}\""
 
 EXISTING_CRON=$(crontab -l 2>/dev/null || true)
 CLEANED_CRON=$(echo "${EXISTING_CRON}" | grep -v "scripts/janitor.sh" || true)
