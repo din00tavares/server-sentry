@@ -304,11 +304,16 @@ def main():
         if os.path.exists(notify_script):
             items_str = "\n".join(newly_added)
             msg = (
-                f"<b>🔍 New Project(s) Discovered & Monitored:</b>\n\n"
+                f"🎉 <b>Novo(s) Projeto(s) Detectado(s) & Adicionado(s)!</b>\n\n"
                 f"{items_str}\n\n"
-                f"• Registered in Uptime Kuma with Telegram alerts active."
+                f"• Registrado automaticamente no Uptime Kuma com alertas ativos no Telegram."
             )
-            subprocess.run([notify_script, msg], capture_output=True)
+            print("📡 Disparando notificação no Telegram do Server-Sentry...")
+            res = subprocess.run([notify_script, msg])
+            if res.returncode == 0:
+                print("✅ Notificação enviada com sucesso ao Telegram!")
+            else:
+                print(f"⚠️ Erro ao enviar notificação ao Telegram (código {res.returncode})")
 
 if __name__ == '__main__':
     main()
