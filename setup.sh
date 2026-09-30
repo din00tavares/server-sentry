@@ -81,21 +81,27 @@ EOF
   echo "✅ Docker log rotation successfully enabled (150MB cap per container)."
 fi
 
-# 5. Idempotent Cronjob Configuration (Daily Cleanup at 03:00)
+# 5. Idempotent Cronjob Configuration (Discovery at 02:50 AM, Cleanup at 03:00 AM)
+SYNC_PATH="${SCRIPT_DIR}/scripts/sync-monitors.sh"
 JANITOR_PATH="${SCRIPT_DIR}/scripts/janitor.sh"
 LOG_DIR="${SCRIPT_DIR}/logs"
-LOG_PATH="${LOG_DIR}/janitor.log"
 mkdir -p "${LOG_DIR}"
-CRON_LINE="0 3 * * * ${JANITOR_PATH} >> ${LOG_PATH} 2>&1 || ${SCRIPT_DIR}/scripts/notify-telegram.sh \"🚨 Janitor cronjob execution failed! Check ${LOG_PATH}\""
+
+SYNC_CRON="50 2 * * * ${SYNC_PATH} >> ${LOG_DIR}/sync-monitors.log 2>&1 || ${SCRIPT_DIR}/scripts/notify-telegram.sh \"🚨 Project discovery cronjob execution failed! Check ${LOG_DIR}/sync-monitors.log\""
+JANITOR_CRON="0 3 * * * ${JANITOR_PATH} >> ${LOG_DIR}/janitor.log 2>&1 || ${SCRIPT_DIR}/scripts/notify-telegram.sh \"🚨 Janitor cronjob execution failed! Check ${LOG_DIR}/janitor.log\""
 
 EXISTING_CRON=$(crontab -l 2>/dev/null || true)
-CLEANED_CRON=$(echo "${EXISTING_CRON}" | grep -v "scripts/janitor.sh" || true)
+CLEANED_CRON=$(echo "${EXISTING_CRON}" | grep -v "scripts/janitor.sh" | grep -v "scripts/sync-monitors.sh" || true)
+
+NEW_CRON="${SYNC_CRON}
+${JANITOR_CRON}"
 
 if [[ -n "${CLEANED_CRON}" ]]; then
-  echo -e "${CLEANED_CRON}\n${CRON_LINE}" | crontab -
+  echo -e "${CLEANED_CRON}\n${NEW_CRON}" | crontab -
 else
-  echo "${CRON_LINE}" | crontab -
+  echo -e "${NEW_CRON}" | crontab -
 fi
+echo "⏰ Daily discovery cronjob configured for 02:50 AM."
 echo "⏰ Daily maintenance cronjob configured for 03:00 AM."
 
 # 6. Docker Stack Deployment

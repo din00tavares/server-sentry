@@ -216,6 +216,7 @@ def main():
     # 4. Idempotent insertion into Uptime Kuma
     added_count = 0
     existing_count = 0
+    newly_added = []
 
     cur.execute("SELECT url, docker_container, name FROM monitor")
     existing_records = cur.fetchall()
@@ -251,6 +252,7 @@ def main():
             """, (name, url, codes, desc))
             m_id = cur.lastrowid
             added_count += 1
+            newly_added.append(f"• <b>{name}</b> (HTTP: <code>{url}</code>)")
 
             if notif_id:
                 link_monitor_notification(cur, m_id, notif_id)
@@ -279,6 +281,7 @@ def main():
             """, (name, d_host, container_name, desc))
             m_id = cur.lastrowid
             added_count += 1
+            newly_added.append(f"• <b>{name}</b> (Container: <code>{container_name}</code>)")
 
             if notif_id:
                 link_monitor_notification(cur, m_id, notif_id)
@@ -296,6 +299,16 @@ def main():
         print("🔄 Restarting Uptime Kuma to activate newly added monitors...")
         subprocess.run(['docker', 'restart', 'server-sentry-uptime-kuma'], capture_output=True)
         print("✅ Uptime Kuma updated!")
+
+        notify_script = os.path.join(script_dir, "notify-telegram.sh")
+        if os.path.exists(notify_script):
+            items_str = "\n".join(newly_added)
+            msg = (
+                f"<b>🔍 New Project(s) Discovered & Monitored:</b>\n\n"
+                f"{items_str}\n\n"
+                f"• Registered in Uptime Kuma with Telegram alerts active."
+            )
+            subprocess.run([notify_script, msg], capture_output=True)
 
 if __name__ == '__main__':
     main()

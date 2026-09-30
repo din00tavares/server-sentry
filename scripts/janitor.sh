@@ -59,9 +59,15 @@ echo "========================================================="
 echo " [Server-Sentry Janitor] Starting maintenance routine..."
 echo "========================================================="
 
-# 0. Check and apply stable updates for Server-Sentry stack
+# 0. Discover new projects and sync monitors into Uptime Kuma
+if [[ -f "${SCRIPT_DIR}/sync-monitors.sh" ]]; then
+  echo "[0/5] Discovering new projects and synchronizing monitors..."
+  "${SCRIPT_DIR}/sync-monitors.sh" || true
+fi
+
+# 1. Check and apply stable updates for Server-Sentry stack
 if [[ -f "${SCRIPT_DIR}/auto-update.sh" ]]; then
-  echo "[0/4] Checking and applying stable stack updates..."
+  echo "[1/5] Checking and applying stable stack updates..."
   "${SCRIPT_DIR}/auto-update.sh" || true
 fi
 
