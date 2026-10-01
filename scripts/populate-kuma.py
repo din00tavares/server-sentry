@@ -77,7 +77,7 @@ def get_npm_domains():
                     "name": sub,
                     "type": "http",
                     "url": f"{scheme}://{domain}",
-                    "accepted_codes": '["200-299","300-399","404"]' if 'api' in domain else '["200-299","300-399"]',
+                    "accepted_codes": '["200-299","300-399","404"]' if any(w in domain for w in ['api', 'midia']) else '["200-299","300-399"]',
                     "description": f"Automatically discovered via Nginx Proxy Manager ({domain})"
                 })
     except Exception as e:
@@ -247,8 +247,8 @@ def main():
                     name, active, user_id, interval, url, type, weight,
                     maxretries, ignore_tls, upside_down, maxredirects,
                     accepted_statuscodes_json, retry_interval, method,
-                    expiry_notification, description, timeout
-                ) VALUES (?, 1, 1, 60, ?, 'http', 2000, 1, 0, 0, 10, ?, 30, 'GET', 1, ?, 48)
+                    expiry_notification, description, timeout, resend_interval
+                ) VALUES (?, 1, 1, 60, ?, 'http', 2000, 1, 0, 0, 10, ?, 30, 'GET', 1, ?, 48, 20)
             """, (name, url, codes, desc))
             m_id = cur.lastrowid
             added_count += 1
@@ -276,8 +276,8 @@ def main():
                 INSERT INTO monitor (
                     name, active, user_id, interval, type, weight,
                     maxretries, retry_interval, docker_host, docker_container,
-                    description, timeout
-                ) VALUES (?, 1, 1, 60, 'docker', 2000, 1, 30, ?, ?, ?, 48)
+                    description, timeout, resend_interval
+                ) VALUES (?, 1, 1, 60, 'docker', 2000, 1, 30, ?, ?, ?, 48, 20)
             """, (name, d_host, container_name, desc))
             m_id = cur.lastrowid
             added_count += 1
@@ -288,6 +288,8 @@ def main():
 
             print(f"  ➕ New Docker container monitor registered: [{name}] -> {container_name}")
 
+    # Ensure all monitors have recurring down alerts enabled (resend every 20m)
+    cur.execute("UPDATE monitor SET resend_interval = 20 WHERE resend_interval IS NULL OR resend_interval = 0")
     conn.commit()
     conn.close()
 
